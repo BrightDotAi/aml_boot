@@ -4,6 +4,7 @@ use std::time::Duration;
 
 mod blinky;
 mod protocol;
+mod protocol_adnl;
 
 const USB_VID_AMLOGIC: u16 = 0x1b8e;
 const USB_PID_GX_CHIP: u16 = 0xc003;
@@ -42,11 +43,11 @@ enum Command {
     /// Read a 32-bit value from memory
     #[clap(verbatim_doc_comment)]
     ReadMem {
-        #[arg(index = 1, value_parser=clap_num::maybe_hex::<u32>)]
-        address: u32,
+        #[arg(index = 1, value_parser=clap_num::maybe_hex::<u64>)]
+        address: u64,
 
-        #[arg(index = 2, default_value_t = 4)]
-        count: u8,
+        #[arg(index = 2, default_value_t = 512)]
+        len: u64,
     },
     /// Write a 32-bit value to memory
     #[clap(verbatim_doc_comment)]
@@ -65,6 +66,9 @@ enum Command {
     /// Write file to SRAM (S905D3 only for now; must be multiple of 64 bytes)
     #[clap(verbatim_doc_comment)]
     Write {
+        #[arg(index = 1, value_parser=clap_num::maybe_hex::<u64>)]
+        offset: u64,
+        #[arg(index = 2)]
         file_name: String,
     },
     /// Execute code at memory address
@@ -148,12 +152,14 @@ fn main() {
 
     if let Ok(p) = handle.read_product_string_ascii(&des) {
         println!("Product string: {p}");
+    } else {
+        println!("Failed to read product string!")
     }
 
-    if pid == USB_PID_AML_DNL {
-        protocol::password_test(&handle, timeout);
-        return;
-    }
+    // if pid == USB_PID_AML_DNL {
+    //     protocol::password_test(&handle, timeout);
+    //     return;
+    // }
 
     match cmd {
         Command::Nop => {
@@ -166,12 +172,15 @@ fn main() {
         }
         Command::Info => {
             println!("\n=======\n");
-            protocol::info(&handle, timeout);
+            // protocol::info(&handle, timeout);
+            protocol_adnl::devices(&handle);
+            // protocol_adnl::oem_mwrite(&handle);
             println!();
         }
         Command::ChipInfo => {
             println!("\n=======\n");
-            protocol::chip_info(&handle, timeout);
+            // protocol_adnl::oem_mwrite(&handle);
+            // protocol::chip_info(&handle, timeout);
             println!();
         }
         Command::ChipId => {
@@ -184,8 +193,10 @@ fn main() {
             protocol::power_states(&handle, timeout);
             println!();
         }
-        Command::ReadMem { address, count } => {
-            protocol::read_mem(&handle, timeout, address, count).unwrap();
+        Command::ReadMem { address, len } => {
+            protocol_adnl::oem_mread(&handle, address, len);
+
+            // protocol::read_mem(&handle, timeout, address, count).unwrap();
             // println!("{v:?}");
         }
         Command::WriteMem { address, value } => {
@@ -204,10 +215,12 @@ fn main() {
                 .unwrap();
             file.write_all(&res).unwrap();
         }
-        Command::Write { file_name } => {
-            let file = std::fs::read(file_name).unwrap();
-            let addr = protocol::S905D3_AHB_SRAM_BASE;
-            protocol::write(&handle, timeout, &file, addr);
+        Command::Write { offset, file_name } => {
+            // let file = std::fs::read(file_name).unwrap();
+            // let addr = protocol::S905D3_AHB_SRAM_BASE;
+            println!("Writing {} to offset 0x{:016x}", file_name, offset);
+            protocol_adnl::oem_mwrite(&handle, offset, file_name);
+            // protocol::write(&handle, timeout, &file, addr);
         }
         Command::Exec { address } => {
             protocol::exec(&handle, timeout, address).unwrap();
