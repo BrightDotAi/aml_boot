@@ -1,4 +1,4 @@
-use std::{time::Duration, path::PathBuf};
+use std::{time::Duration, path::PathBuf, io};
 
 use crate::protocol::Handle;
 
@@ -39,7 +39,7 @@ impl From<Cmd_Adnl> for String {
 }
 
 pub fn oem_mwrite(h: &Handle, offset: u64, file: impl AsRef<str>) {
-
+  use std::io::Write;
   if let Some(data) = std::fs::read(PathBuf::from(file.as_ref())).ok() {
     println!("File is {} Bytes", data.len());
 
@@ -79,7 +79,8 @@ pub fn oem_mwrite(h: &Handle, offset: u64, file: impl AsRef<str>) {
             total += by;
             let pcent = ((total as f64 /  data.len() as f64) * 100.0).round();
             if pcent != last_pcent {
-              println!("Percent complete: {:02}%", pcent);
+              print!("\rPercent complete: {:3}%", pcent);
+              io::stdout().flush().ok();
               last_pcent = pcent.round();
             }
           }
@@ -92,6 +93,8 @@ pub fn oem_mwrite(h: &Handle, offset: u64, file: impl AsRef<str>) {
         offset = offset + ch.len() as u64;
         ix += 1;
     }
+
+    println!("\nFinished!");
 
 
     // h.write_bulk(ADNL_OUT_EP, String::from(Cmd_Adnl::OemMwriteRequest).as_bytes(), timeout).ok();
