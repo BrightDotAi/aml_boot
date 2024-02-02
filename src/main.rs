@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::io::Write;
+use std::path::Path;
 use std::time::Duration;
 
 mod blinky;
@@ -96,6 +97,15 @@ enum Command {
     BruteForceCmds {
         #[arg(index = 1, default_value = "")]
         yolo: String,
+    },
+
+    Flash {
+        #[arg(index = 1, default_value = "")]
+        bl1: String,
+        #[arg(index = 2, default_value = "")]
+        bl2: String,
+        #[arg(index = 3, default_value = "")]
+        wic: String,
     },
 }
 
@@ -259,6 +269,19 @@ fn main() {
                 panic!("Run 'brute-force-cmds YOLO' if you really want this, be careful!");
             }
             protocol::brute_force_cmds(&handle, timeout);
+        }
+        Command::Flash { bl1, bl2, wic } => {
+            // println!("Args: {} {}", bl1, bl2);
+            if ! Path::new(&bl1).exists() {
+                println!("File '{}' not found", bl1);
+                return
+            }
+            if ! Path::new(&bl2).exists() {
+                println!("File '{}' not found", bl2);
+                return
+            }
+
+            protocol_adnl::do_flash(&handle, bl1, bl2, wic)
         }
     }
 }
