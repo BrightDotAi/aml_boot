@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use std::io::Write;
+use std::path::Path;
 use std::time::Duration;
 
 mod blinky;
@@ -97,6 +98,40 @@ enum Command {
         #[arg(index = 1, default_value = "")]
         yolo: String,
     },
+
+    // Flash {
+    //     #[arg(index = 1, default_value = "")]
+    //     bl1: String,
+    //     #[arg(index = 2, default_value = "")]
+    //     bl2: String,
+    //     #[arg(index = 3, default_value = "")]
+    //     wic: String,
+    // },
+
+
+    /// Perform full flash sequence of EdgeOS after device is
+    /// put in downloader mode
+    #[clap(verbatim_doc_comment)]
+    Flash {
+        #[arg(short, long, index = 1, default_value = "")]
+        wic: String,
+    },
+
+
+    /// Perform flash sequence of EdgeOS after device is
+    /// put in adnl mode
+    #[clap(verbatim_doc_comment)]
+    FlashAdnl {
+        #[arg(short, long, index = 1, default_value = "")]
+        wic: String,
+    },
+
+    InvalidateMBR {
+        #[arg(long)]
+        bl1: String,
+        #[arg(long)]
+        bl2: String,
+    }
 }
 
 /// Amlogic mask ROM loader tool
@@ -219,7 +254,7 @@ fn main() {
             // let file = std::fs::read(file_name).unwrap();
             // let addr = protocol::S905D3_AHB_SRAM_BASE;
             println!("Writing {} to offset 0x{:016x}", file_name, offset);
-            protocol_adnl::oem_mwrite(&handle, offset, file_name);
+            protocol_adnl::oem_mwrite(&handle, offset, protocol_adnl::OemWriteType::File(&file_name));
             // protocol::write(&handle, timeout, &file, addr);
         }
         Command::Exec { address } => {
@@ -259,6 +294,39 @@ fn main() {
                 panic!("Run 'brute-force-cmds YOLO' if you really want this, be careful!");
             }
             protocol::brute_force_cmds(&handle, timeout);
+        }
+        Command::Flash { wic } => {
+
+            let wic_p = Path::canonicalize(Path::new(&wic)).unwrap();
+            if ! Path::new(&wic_p).exists() {
+                println!("File '{}' not found", wic);
+                return
+            }
+            let dev = protocol_adnl::do_flash(&handle)
+                .expect("Failed to flash");
+
+            let handle = dev.open().expect("Failed to open usb device");
+            protocol_adnl::oem_mwrite(&handle, 0, protocol_adnl::OemWriteType::File(wic_p.to_str().unwrap()));
+        }
+
+        Command::FlashAdnl { wic } => {
+            let wic_p = Path::canonicalize(Path::new(&wic)).unwrap();
+            if ! Path::new(&wic_p).exists() {
+                println!("File '{}' not found", wic);
+                return
+            }
+            protocol_adnl::oem_mwrite(&handle, 0, protocol_adnl::OemWriteType::File(wic_p.to_str().unwrap()));
+        }
+
+        Command::InvalidateMBR { bl1, bl2 } => {
+
+           let bl1_p = Path::canonicalize(Path::new(&bl1)).unwrap();
+           let bl2_p = Path::canonicalize(Path::new(&bl2)).unwrap();
+
+            protocol_adnl::invalidate_mbr(&handle,
+                bl1_p.to_str().unwrap(),
+                bl2_p.to_str().unwrap())
+                .expect("Failed to invalidate mbr");
         }
     }
 }
