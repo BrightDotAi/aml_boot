@@ -1,4 +1,4 @@
-use std::{io, path::PathBuf, time::{Duration, Instant}};
+use std::{io, path::PathBuf, process::exit, time::{Duration, Instant}};
 use std::io::Write;
 
 use regex::Regex;
@@ -71,57 +71,51 @@ pub fn oem_mwrite(h: &Handle, offset: u64, input: OemWriteType) {
   let mut offset = offset;
   let timeout = Duration::from_millis(3000);
   let mut total = 0;
-  let mut last_pcent = 100.0;
   let mut len = data.len();
 
   let (tx, rx) = std::sync::mpsc::channel::<usize>();
-  // let mut len = data.len();
   let progress = std::thread::spawn(move || {
     let now = Instant::now();
     let total_len = len;
-
+    let mut last_pcent = 0.0;
     loop {
       match rx.recv() {
         Ok(by) => {
           len -= by;
           total += by;
-          // round this to tenths of percent
-          let pcent = ((((total as f64 / total_len as f64) * 100.0) * 10.0).round()) / 10.0;
-          if pcent != last_pcent {
-            last_pcent = pcent;
-            let n = now.elapsed();
-            print!("\r[{:5.1}%]: Remaining {:>10}, Elapsed {:<03.3} seconds", pcent, len, n.as_millis() as f64 / 1000.0);
-            io::stdout().flush().ok();
-          }
-          if total == total_len {
-            break
-          }
         }
         Err(e) => {
           print!("\nFailed in rx thread! {:?}", e);
           break;
         }
       }
+      // round this to tenths of percent
+      let pcent = ((((total as f64 / total_len as f64) * 100.0) * 10.0).round()) / 10.0;
+      // back-off the updating of the text to a reasonble speed
+      if last_pcent != pcent || len <= 0 {
+        last_pcent = pcent;
+        let n = now.elapsed();
+        print!("\r[{:5.1}%]: Remaining {:>10}, Elapsed {:<03.3} seconds", pcent, len, n.as_millis() as f64 / 1000.0);
+        io::stdout().flush().ok();
+      }
+      if len <= 0 {
+        break
+      }
     }
   });
 
   for (_ix ,ch) in data.chunks(0x20000).enumerate() {
-    if let Ok(_len) = h.write_bulk(ADNL_OUT_EP, String::from(CmdAdnl::OemMwriteInit(1, offset, ch.len() as u64)).as_bytes(), timeout) {
-    } else {
-      println!("Failed to write");
+    if let Err(e) = h.write_bulk(ADNL_OUT_EP, String::from(CmdAdnl::OemMwriteInit(1, offset, ch.len() as u64)).as_bytes(), timeout) {
+      println!("Failed to write: {:?}", e);
       return
     }
+
     let mut resp = [0u8; 512];
-    match h.read_bulk(ADNL_IN_EP, &mut resp, timeout) {
-      Ok(_len) => {
-        // println!("Read {len} bytes!");
-        // println!("{}", String::from_utf8_lossy(&resp));
-      }
-      Err(e) => {
-        println!("Failed to read: {:?}", e);
-        return
-      }
+    if let Err(e)  = h.read_bulk(ADNL_IN_EP, &mut resp, timeout) {
+      println!("Failed to read: {:?}", e);
+      return
     }
+
     h.write_bulk(ADNL_OUT_EP, String::from(CmdAdnl::OemMwriteRequest).as_bytes(), timeout).ok();
     h.read_bulk(ADNL_IN_EP, &mut resp, timeout).ok();
       resp = [0u8; 512];
@@ -135,24 +129,13 @@ pub fn oem_mwrite(h: &Handle, offset: u64, input: OemWriteType) {
         }
       }
       h.read_bulk(ADNL_IN_EP, &mut resp, timeout).ok();
-      // println!("{}", String::from_utf8_lossy(&resp));
       offset += ch.len() as u64;
   }
-  progress.join().expect("Failed to 'join' progress handle");
 
+  progress.join().expect("Failed to 'join' progress handle");
   println!("\nFinished!");
 
-
-  // h.write_bulk(ADNL_OUT_EP, String::from(CmdAdnl::OemMwriteRequest).as_bytes(), timeout).ok();
-  // h.read_bulk(ADNL_IN_EP, &mut resp, timeout).ok();
-  // println!("{}", String::from_utf8_lossy(&resp));
-  // resp = [0u8; 512];
-  // h.write_bulk(ADNL_OUT_EP, &data, timeout).ok();
-  // h.read_bulk(ADNL_IN_EP, &mut resp, timeout).ok();
-  // println!("{}", String::from_utf8_lossy(&resp));
-
 }
-
 
 pub fn oem_mread(h: &Handle, offset: u64, len: u64) {
 
@@ -344,6 +327,7 @@ pub fn do_bootloader_flash(h: &Handle) -> Result<Device<GlobalContext>, String> 
   do_read_bulk(h).unwrap();
   ////
 
+
   std::thread::sleep(Duration::from_millis(500));
   do_write_blk_cmd(h, "getvar:identify").unwrap();
   do_read_bulk(h).ok();
@@ -414,16 +398,52 @@ pub fn do_bootloader_flash(h: &Handle) -> Result<Device<GlobalContext>, String> 
 }
 
 // this doesn't actually work unfortunately
-pub fn invalidate_mbr(h: &Handle, _bl1: impl AsRef<str>, _bl2: impl AsRef<str>) -> Result<(), String> {
+pub fn erase_emmc(h: &Handle) -> Result<Device<GlobalContext>, String> {
 
   let dev = do_bootloader_flash(h).expect("Failed to flash bootloader(s)");
   let handle = dev.open().expect("Failed to open usb device");
   let h = &handle;
 
-  let data = [0u8; 1024];
+  // this will wipe the boot partitions
+  do_write_blk_cmd(h, "oem disk_initial 1").unwrap();
+  do_read_bulk(h).unwrap();
+
+  // this will format the boot partition, located
+  // 4MB from the 'start' of emmc, per the wic file
+  let data = [0u8; 102400];
+  oem_mwrite(h, 8192*512, OemWriteType::Raw(&data));
+
+  // for good measure, blow away the mbr too
   oem_mwrite(h, 0, OemWriteType::Raw(&data));
 
-  Ok(())
+  // reflash the bootloader we just erased to boot into adnl mode
+  let data = UBOOT_BIN_SIGNED;
+
+  let dlsize = data.len() as u32;
+  let mut csum = AdnlChecksum::new();
+
+  // now write the entire file to flash/boot partition
+  // important bits duped from `do_flash` below...
+  do_write_blk_cmd(h, "oem disk_initial 1").unwrap();
+  do_read_bulk(h).unwrap();
+  do_write_blk_cmd(h, format!("oem mwrite 0x{:08X} normal store bootloader",dlsize).as_str()).unwrap();
+  do_read_bulk(h).unwrap();
+  do_write_blk_cmd(h, "mwrite:verify=addsum").unwrap();
+  do_read_bulk(h).unwrap();
+
+  for ch in data.chunks(0x4000) {
+    csum.update(ch);
+    do_write_blk_cmd(h, ch).expect("Failed to write chunk!");
+  }
+  let buf = csum.get_csum().to_le_bytes();
+  do_write_blk_cmd(h, buf.as_ref()).expect("Failed to write checksum");
+  do_read_bulk(h).unwrap();
+
+  do_write_blk_cmd(h, "reboot").unwrap();
+  do_read_bulk(h).unwrap();
+
+  Ok(wait_for_device_reconnect().expect("Failed to detect device"))
+
 }
 
 pub fn do_flash(h: &Handle) -> Result<Device<GlobalContext>, String> {

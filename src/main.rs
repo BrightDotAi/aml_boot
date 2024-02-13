@@ -126,12 +126,19 @@ enum Command {
         wic: String,
     },
 
-    InvalidateMBR {
-        #[arg(long)]
-        bl1: String,
-        #[arg(long)]
-        bl2: String,
+    #[clap(verbatim_doc_comment)]
+    /// Erases enough things in eMMC to allow reprograming
+    /// of the device
+    EraseMMC {
+    },
+
+    #[clap(verbatim_doc_comment)]
+    /// Erase enough emmc to fully reflash device
+    DoItAll {
+        #[arg(short, long, index = 1, default_value = "")]
+        wic: String,
     }
+
 }
 
 /// Amlogic mask ROM loader tool
@@ -318,15 +325,21 @@ fn main() {
             protocol_adnl::oem_mwrite(&handle, 0, protocol_adnl::OemWriteType::File(wic_p.to_str().unwrap()));
         }
 
-        Command::InvalidateMBR { bl1, bl2 } => {
-
-           let bl1_p = Path::canonicalize(Path::new(&bl1)).unwrap();
-           let bl2_p = Path::canonicalize(Path::new(&bl2)).unwrap();
-
-            protocol_adnl::invalidate_mbr(&handle,
-                bl1_p.to_str().unwrap(),
-                bl2_p.to_str().unwrap())
+        Command::EraseMMC { } => {
+            protocol_adnl::erase_emmc(&handle)
                 .expect("Failed to invalidate mbr");
+        }
+
+        Command::DoItAll { wic } => {
+            let wic_p = Path::canonicalize(Path::new(&wic)).unwrap();
+            if ! Path::new(&wic_p).exists() {
+                println!("File '{}' not found", wic);
+                return
+            }
+            let dev = protocol_adnl::erase_emmc(&handle)
+                .expect("Failed to invalidate mbr");
+            let handle = dev.open().expect("Failed to open usb device");
+            protocol_adnl::oem_mwrite(&handle, 0, protocol_adnl::OemWriteType::File(wic_p.to_str().unwrap()));
         }
     }
 }
