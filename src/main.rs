@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use std::ffi::OsStr;
+
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
@@ -108,8 +108,6 @@ enum Command {
     //     #[arg(index = 3, default_value = "")]
     //     wic: String,
     // },
-
-
     /// Perform full flash sequence of EdgeOS after device is
     /// put in downloader mode
     #[clap(verbatim_doc_comment)]
@@ -117,7 +115,6 @@ enum Command {
         #[arg(short, long, index = 1, default_value = "")]
         wic: String,
     },
-
 
     /// Perform flash sequence of EdgeOS after device is
     /// put in adnl mode
@@ -130,16 +127,14 @@ enum Command {
     #[clap(verbatim_doc_comment)]
     /// Erases enough things in eMMC to allow reprograming
     /// of the device
-    EraseMMC {
-    },
+    EraseMMC {},
 
     #[clap(verbatim_doc_comment)]
     /// Erase enough emmc to fully reflash device
     DoItAll {
         #[arg(short, long, index = 1, default_value = "")]
         wic: String,
-    }
-
+    },
 }
 
 /// Amlogic mask ROM loader tool
@@ -262,7 +257,11 @@ fn main() {
             // let file = std::fs::read(file_name).unwrap();
             // let addr = protocol::S905D3_AHB_SRAM_BASE;
             println!("Writing {} to offset 0x{:016x}", file_name, offset);
-            protocol_adnl::oem_mwrite(&handle, offset, protocol_adnl::OemWriteType::File(&file_name));
+            protocol_adnl::oem_mwrite(
+                &handle,
+                offset,
+                protocol_adnl::OemWriteType::File(&file_name),
+            );
             // protocol::write(&handle, timeout, &file, addr);
         }
         Command::Exec { address } => {
@@ -304,63 +303,57 @@ fn main() {
             protocol::brute_force_cmds(&handle, timeout);
         }
         Command::Flash { wic } => {
-
             let wic_p = Path::canonicalize(Path::new(&wic)).unwrap();
-            if ! Path::new(&wic_p).exists() {
+            if !Path::new(&wic_p).exists() {
                 println!("File '{}' not found", wic);
-                return
+                return;
             }
 
             let input = match Path::extension(&wic_p).unwrap().to_str() {
-                Some("bz2") => { protocol_adnl::OemWriteType::Bzip2(wic_p.to_str().unwrap()) },
-                _ => {protocol_adnl::OemWriteType::File(wic_p.to_str().unwrap()) },
+                Some("bz2") => protocol_adnl::OemWriteType::Bzip2(wic_p.to_str().unwrap()),
+                _ => protocol_adnl::OemWriteType::File(wic_p.to_str().unwrap()),
             };
 
-            let dev = protocol_adnl::do_flash(&handle)
-                .expect("Failed to flash");
+            let dev = protocol_adnl::do_flash(&handle).expect("Failed to flash");
 
             let handle = dev.open().expect("Failed to open usb device");
             protocol_adnl::oem_mwrite(&handle, 0, input);
             protocol_adnl::device_reboot(&handle);
-
         }
 
         Command::FlashAdnl { wic } => {
             let wic_p = Path::canonicalize(Path::new(&wic)).unwrap();
-            if ! Path::new(&wic_p).exists() {
+            if !Path::new(&wic_p).exists() {
                 println!("File '{}' not found", wic);
-                return
+                return;
             }
 
             let input = match Path::extension(&wic_p).unwrap().to_str() {
-                Some("bz2") => { protocol_adnl::OemWriteType::Bzip2(wic_p.to_str().unwrap()) },
-                _ => {protocol_adnl::OemWriteType::File(wic_p.to_str().unwrap()) },
+                Some("bz2") => protocol_adnl::OemWriteType::Bzip2(wic_p.to_str().unwrap()),
+                _ => protocol_adnl::OemWriteType::File(wic_p.to_str().unwrap()),
             };
 
             protocol_adnl::oem_mwrite(&handle, 0, input);
             protocol_adnl::device_reboot(&handle);
         }
 
-        Command::EraseMMC { } => {
-            protocol_adnl::erase_emmc(&handle)
-                .expect("Failed to invalidate mbr");
+        Command::EraseMMC {} => {
+            protocol_adnl::erase_emmc(&handle).expect("Failed to invalidate mbr");
         }
 
         Command::DoItAll { wic } => {
-
             let wic_p = Path::canonicalize(Path::new(&wic)).unwrap();
-            if ! Path::new(&wic_p).exists() {
+            if !Path::new(&wic_p).exists() {
                 println!("File '{}' not found", wic);
-                return
+                return;
             }
 
             let input = match Path::extension(&wic_p).unwrap().to_str() {
-                Some("bz2") => { protocol_adnl::OemWriteType::Bzip2(wic_p.to_str().unwrap()) },
-                _ => {protocol_adnl::OemWriteType::File(wic_p.to_str().unwrap()) },
+                Some("bz2") => protocol_adnl::OemWriteType::Bzip2(wic_p.to_str().unwrap()),
+                _ => protocol_adnl::OemWriteType::File(wic_p.to_str().unwrap()),
             };
 
-            let dev = protocol_adnl::erase_emmc(&handle)
-            .expect("Failed to invalidate mbr");
+            let dev = protocol_adnl::erase_emmc(&handle).expect("Failed to invalidate mbr");
             let handle = dev.open().expect("Failed to open usb device");
             protocol_adnl::oem_mwrite(&handle, 0, input);
             protocol_adnl::device_reboot(&handle);
