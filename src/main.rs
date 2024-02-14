@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand, ValueEnum};
+use std::ffi::OsStr;
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
@@ -309,11 +310,19 @@ fn main() {
                 println!("File '{}' not found", wic);
                 return
             }
+
+            let input = match Path::extension(&wic_p).unwrap().to_str() {
+                Some("bz2") => { protocol_adnl::OemWriteType::Bzip2(wic_p.to_str().unwrap()) },
+                _ => {protocol_adnl::OemWriteType::File(wic_p.to_str().unwrap()) },
+            };
+
             let dev = protocol_adnl::do_flash(&handle)
                 .expect("Failed to flash");
 
             let handle = dev.open().expect("Failed to open usb device");
-            protocol_adnl::oem_mwrite(&handle, 0, protocol_adnl::OemWriteType::File(wic_p.to_str().unwrap()));
+            protocol_adnl::oem_mwrite(&handle, 0, input);
+            protocol_adnl::device_reboot(&handle);
+
         }
 
         Command::FlashAdnl { wic } => {
@@ -322,7 +331,14 @@ fn main() {
                 println!("File '{}' not found", wic);
                 return
             }
-            protocol_adnl::oem_mwrite(&handle, 0, protocol_adnl::OemWriteType::File(wic_p.to_str().unwrap()));
+
+            let input = match Path::extension(&wic_p).unwrap().to_str() {
+                Some("bz2") => { protocol_adnl::OemWriteType::Bzip2(wic_p.to_str().unwrap()) },
+                _ => {protocol_adnl::OemWriteType::File(wic_p.to_str().unwrap()) },
+            };
+
+            protocol_adnl::oem_mwrite(&handle, 0, input);
+            protocol_adnl::device_reboot(&handle);
         }
 
         Command::EraseMMC { } => {
@@ -331,15 +347,23 @@ fn main() {
         }
 
         Command::DoItAll { wic } => {
+
             let wic_p = Path::canonicalize(Path::new(&wic)).unwrap();
             if ! Path::new(&wic_p).exists() {
                 println!("File '{}' not found", wic);
                 return
             }
+
+            let input = match Path::extension(&wic_p).unwrap().to_str() {
+                Some("bz2") => { protocol_adnl::OemWriteType::Bzip2(wic_p.to_str().unwrap()) },
+                _ => {protocol_adnl::OemWriteType::File(wic_p.to_str().unwrap()) },
+            };
+
             let dev = protocol_adnl::erase_emmc(&handle)
-                .expect("Failed to invalidate mbr");
+            .expect("Failed to invalidate mbr");
             let handle = dev.open().expect("Failed to open usb device");
-            protocol_adnl::oem_mwrite(&handle, 0, protocol_adnl::OemWriteType::File(wic_p.to_str().unwrap()));
+            protocol_adnl::oem_mwrite(&handle, 0, input);
+            protocol_adnl::device_reboot(&handle);
         }
     }
 }
