@@ -1,4 +1,4 @@
-use std::{io, path::PathBuf, process::exit, time::{Duration, Instant}};
+use std::{io::{self, BufRead, BufReader, Cursor, Read}, path::PathBuf, process::exit, sync::mpsc::{self, Receiver, Sender}, thread::{current, JoinHandle}, time::{Duration, Instant}};
 use std::io::Write;
 
 use regex::Regex;
@@ -52,89 +52,142 @@ impl From<CmdAdnl> for String {
 pub enum OemWriteType<'a> {
   File(&'a str),
   Raw(&'a[u8]),
+  Bzip2(&'a str),
+}
+
+fn bzip2_threads(rx: Receiver<Vec<u8>>, tx2: Sender<Vec<u8>>) {
+  let mut total=0;
+  let mut working_set: Vec<u8> = Vec::new();
+  let mut is_done = false;
+  loop {
+    match rx.recv() {
+      Ok(buf) => {
+        if buf.is_empty() {
+          is_done = true;
+        } else {
+            let mut tvec: Vec<u8> = Vec::new();
+            buf.as_slice().read_to_end(&mut tvec).expect("Failed to read data in thread");
+            working_set.append(&mut tvec);
+            total += buf.len();
+        }
+      }
+      Err(e) => {
+        break;
+      }
+    }
+
+    if working_set.len() >= 0x20000 {
+      let mut to_drop = 0;
+      for (ix, ch) in working_set.chunks_exact(0x20000).enumerate() {
+        tx2.send(ch.to_vec()).unwrap();
+        to_drop = ix + 1;
+      }
+      // drop what we just sent down the pipe
+      working_set.drain(0..(to_drop * 0x20000));
+
+    } else if is_done && working_set.len() < 0x20000 {
+      tx2.send(working_set.clone()).unwrap();
+      working_set.clear();
+      tx2.send(Vec::new()).unwrap();
+      break;
+    }
+  }
+}
+
+fn do_write_data(h: &Handle, offset: u64, mut data: impl Read, tx: mpsc::Sender<usize>) {
+  let mut offset = offset;
+  let mut buf = [0u8; 0x20000];
+
+  let (tx1 , rx1 ) = mpsc::sync_channel::<Vec<u8>>(25);
+  let (tx2, rx2) = mpsc::channel::<Vec<u8>>();
+
+  let t1 = std::thread::spawn(move || { bzip2_threads(rx1, tx2) });
+  let mut data_finished = false;
+  let mut sent_work_cnt = 0;
+  // this loop chunks the bzip2 data into the expected 0x20000 byte writeable chunks
+  // for the adnl protocol, the bzip2 threads ensures that we do not try to write anything
+  // until we have a full 0x20000 chunk(s), this with the offset being intervals of 0x20000 appear to
+  // be required, though it's not clear exactly why
+  loop {
+    if !data_finished {
+      if let Ok(len) = data.read(&mut buf) {
+        let sent = if len > 0 {
+          let mut dc = Vec::new();
+          let _ = dc.write(&buf[0..len]).expect("Failed to write bytes");
+          tx1.send(dc).is_ok()
+        } else {
+          data_finished = true;
+          tx1.send(Vec::new()).is_ok()
+        };
+
+        if sent {
+          sent_work_cnt += 1;
+        }
+      }
+    }
+
+    match rx2.try_recv() {
+      Ok(data) => {
+        if data.is_empty() {
+          break;
+        }
+        sent_work_cnt -= 1;
+        do_write_blk_cmd(h, String::from(CmdAdnl::OemMwriteInit(1, offset, data.len() as u64)).as_bytes()).unwrap();
+        do_read_bulk(h).unwrap();
+        do_write_blk_cmd(h, String::from(CmdAdnl::OemMwriteRequest).as_bytes()).unwrap();
+        do_read_bulk(h).unwrap();
+        do_write_blk_cmd(h, data.as_slice()).expect("Failed to write data");
+        do_read_bulk(h).unwrap();
+        tx.send(data.len()).ok();
+        offset += data.len() as u64;
+      }
+      Err(_e) => {
+        std::thread::sleep(Duration::from_millis(100));
+        if data_finished && sent_work_cnt <= 0 {
+          break;
+        }
+       }
+    }
+  }
+  drop(tx);
+  t1.join().unwrap();
+
+}
+
+fn progress_thread(rx: Receiver<usize>) -> JoinHandle<()> {
+  std::thread::spawn(move || {
+    let mut total = 0;
+    let now = Instant::now();
+    while let Ok(by) = rx.recv() {
+      total += by;
+      let n = now.elapsed();
+      print!("\rWrote {:>10}, Elapsed {:<03.3} seconds", total, n.as_millis() as f64 / 1000.0);
+      io::stdout().flush().ok();
+    }
+    println!();
+  })
 }
 
 pub fn oem_mwrite(h: &Handle, offset: u64, input: OemWriteType) {
 
-
-  let data = match input {
+  use bzip2::bufread;
+  let (tx, rx) = std::sync::mpsc::channel::<usize>();
+  let progress = progress_thread(rx);
+  match input {
+    OemWriteType::Bzip2(file) => {
+      let buf = BufReader::new(std::fs::File::open(PathBuf::from(file)).unwrap());
+      let bzd = bufread::MultiBzDecoder::new(buf);
+      do_write_data(h, offset, bzd, tx);
+    }
     OemWriteType::File(file) => {
-      std::fs::read(PathBuf::from(file)).expect("Failed to read file")
+      let buf = BufReader::new(std::fs::File::open(PathBuf::from(file)).unwrap());
+      do_write_data(h, offset, buf, tx);
     },
     OemWriteType::Raw(data) => {
-      data.to_vec()
+      do_write_data(h, offset, data, tx);
     }
   };
-
-  println!("Data is {} Bytes", data.len());
-
-  let mut offset = offset;
-  let timeout = Duration::from_millis(3000);
-  let mut total = 0;
-  let mut len = data.len();
-
-  let (tx, rx) = std::sync::mpsc::channel::<usize>();
-  let progress = std::thread::spawn(move || {
-    let now = Instant::now();
-    let total_len = len;
-    let mut last_pcent = 0.0;
-    loop {
-      match rx.recv() {
-        Ok(by) => {
-          len -= by;
-          total += by;
-        }
-        Err(e) => {
-          print!("\nFailed in rx thread! {:?}", e);
-          break;
-        }
-      }
-      // round this to tenths of percent
-      let pcent = ((((total as f64 / total_len as f64) * 100.0) * 10.0).round()) / 10.0;
-      // back-off the updating of the text to a reasonble speed
-      if last_pcent != pcent || len <= 0 {
-        last_pcent = pcent;
-        let n = now.elapsed();
-        print!("\r[{:5.1}%]: Remaining {:>10}, Elapsed {:<03.3} seconds", pcent, len, n.as_millis() as f64 / 1000.0);
-        io::stdout().flush().ok();
-      }
-      if len <= 0 {
-        break
-      }
-    }
-  });
-
-  for (_ix ,ch) in data.chunks(0x20000).enumerate() {
-    if let Err(e) = h.write_bulk(ADNL_OUT_EP, String::from(CmdAdnl::OemMwriteInit(1, offset, ch.len() as u64)).as_bytes(), timeout) {
-      println!("Failed to write: {:?}", e);
-      return
-    }
-
-    let mut resp = [0u8; 512];
-    if let Err(e)  = h.read_bulk(ADNL_IN_EP, &mut resp, timeout) {
-      println!("Failed to read: {:?}", e);
-      return
-    }
-
-    h.write_bulk(ADNL_OUT_EP, String::from(CmdAdnl::OemMwriteRequest).as_bytes(), timeout).ok();
-    h.read_bulk(ADNL_IN_EP, &mut resp, timeout).ok();
-      resp = [0u8; 512];
-      match  do_write_blk_cmd(h, ch) {
-        Ok(by) => {
-          tx.send(by).expect("Failed to send progress data");
-        }
-        Err(e) => {
-          println!("Failed to write bytes: {:?}", e);
-          return;
-        }
-      }
-      h.read_bulk(ADNL_IN_EP, &mut resp, timeout).ok();
-      offset += ch.len() as u64;
-  }
-
   progress.join().expect("Failed to 'join' progress handle");
-  println!("\nFinished!");
-
 }
 
 pub fn oem_mread(h: &Handle, offset: u64, len: u64) {
@@ -212,12 +265,11 @@ fn do_read_bulk(h: &Handle) -> Result<String,String> {
   let mut buf = [0u8; 512];
   let result = match h.read_bulk(ADNL_IN_EP, &mut buf, timeout) {
     Ok(_len) => {
-      // println!("Read {len} bytes!");
       let s = String::from_utf8_lossy(&buf);
+      // println!("{}",s);
       // get the first item as responses are a bit strange from the device (and is probably a bug)
       // OKAY0x3F800<nul>max-download-size<nul>serialno<nul>product<nul>AMLOGIC<nul>identify<nul>getc
       if let Some(r) = s.split('\0').next() {
-        // println!("{:?}",r);
         let re = Regex::new(r"(?<status>(OKAY|FAIL|DATA))(?<msg>.*)").unwrap();
         match re.captures(r) {
           Some(cap) => {
@@ -529,6 +581,13 @@ fn wait_for_device_reconnect() -> Result<Device<GlobalContext>, String> {
     }
   }
   Err("Failed to find device".into())
+}
+
+pub fn device_reboot(h: &Handle) {
+
+  do_write_blk_cmd(h, "reboot").unwrap();
+  do_read_bulk(h).unwrap();
+
 }
 
 struct AdnlChecksum {
