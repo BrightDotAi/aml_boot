@@ -144,16 +144,10 @@ struct Cli {
     /// Command to run
     #[command(subcommand)]
     cmd: Command,
-
-    #[clap(verbatim_doc_comment)]
-    /// Reboot after executing commands
-    #[arg(short, long, index = 1, default_value = "false")]
-    reboot: bool,
 }
 
 fn main() {
     let cmd = Cli::parse().cmd;
-    let reboot = Cli::parse().reboot;
     println!("Searching for Amlogic USB devices...");
     let dev = rusb::devices()
         .unwrap()
@@ -323,9 +317,7 @@ fn main() {
 
             let handle = dev.open().expect("Failed to open usb device");
             protocol_adnl::oem_mwrite(&handle, 0, input);
-            if reboot {
-                protocol_adnl::device_reboot(&handle);
-            }
+            protocol_adnl::device_reboot(&handle);
         }
 
         Command::FlashAdnl { wic } => {
@@ -341,9 +333,7 @@ fn main() {
             };
 
             protocol_adnl::oem_mwrite(&handle, 0, input);
-            if reboot {
-                protocol_adnl::device_reboot(&handle);
-            }
+            protocol_adnl::device_reboot(&handle);
         }
 
         Command::EraseMMC {} => {
@@ -365,9 +355,7 @@ fn main() {
             let dev = protocol_adnl::erase_emmc(&handle).expect("Failed to invalidate mbr");
             let handle = dev.open().expect("Failed to open usb device");
             protocol_adnl::oem_mwrite(&handle, 0, input);
-            if reboot {
-                protocol_adnl::device_reboot(&handle);
-            }
+            protocol_adnl::device_reboot(&handle);
         }
     }
 }
