@@ -417,7 +417,7 @@ pub fn do_bootloader_flash(h: &Handle) -> Result<Device<GlobalContext>, String> 
         addr: u32,
         size: usize,
         last: bool,
-        mode: BootMode
+        mode: BootMode,
     }
 
     let offsets = [
@@ -662,13 +662,13 @@ pub fn device_reboot(h: &Handle) {
 }
 
 #[derive(Debug, PartialEq)]
-pub(crate) enum BootMode {
+pub enum BootMode {
     Bl1,
     Bl2,
-    Bl2e,  // some undefined intermediate mode I guess
+    Bl2e, // some undefined intermediate mode I guess
     Tpl,
 
-    Invalid
+    Invalid,
 }
 
 impl From<Vec<u8>> for BootMode {
@@ -678,15 +678,14 @@ impl From<Vec<u8>> for BootMode {
         }
 
         match value[0..4] {
-            [6,0,0,0] => BootMode::Bl1,
-            [6,0,0,8] => BootMode::Bl2,
-            [6,0,0,12] => BootMode::Bl2e,
-            [6,0,0,16] => BootMode::Tpl,
+            [6, 0, 0, 0] => BootMode::Bl1,
+            [6, 0, 0, 8] => BootMode::Bl2,
+            [6, 0, 0, 12] => BootMode::Bl2e,
+            [6, 0, 0, 16] => BootMode::Tpl,
             _ => BootMode::Invalid,
         }
     }
 }
-
 
 fn identify(h: &Handle) -> BootMode {
     do_write_blk_cmd(h, "getvar:identify").unwrap();
@@ -697,27 +696,25 @@ fn identify(h: &Handle) -> BootMode {
 pub fn check_in_mode(h: &Handle, expected: BootMode) -> Result<(), String> {
     let mode = identify(h);
     if mode != expected {
-        return Err(format!("Expected Mode '{:?}', Was in {:?}", expected, mode))
+        return Err(format!("Expected Mode '{:?}', Was in {:?}", expected, mode));
     }
     Ok(())
 }
 
 fn get_download_size(h: &Handle) -> Result<u32, String> {
-
-  do_write_blk_cmd(h, "getvar:downloadsize").unwrap();
-  match do_read_bulk(h) {
-      Ok(msg) => {
-          let m = String::from_utf8_lossy(&msg);
-          let s = m.split('\0').next().unwrap();
-          Ok(u32::from_str_radix(s.to_lowercase().replace("0x", "").as_str(), 16).unwrap())
-      },
-      Err(e) => {
-          println!("Failed to get download size: {}", e);
-          return Err("Failed to get download size".to_owned());
-      }
-  }
+    do_write_blk_cmd(h, "getvar:downloadsize").unwrap();
+    match do_read_bulk(h) {
+        Ok(msg) => {
+            let m = String::from_utf8_lossy(&msg);
+            let s = m.split('\0').next().unwrap();
+            Ok(u32::from_str_radix(s.to_lowercase().replace("0x", "").as_str(), 16).unwrap())
+        }
+        Err(e) => {
+            println!("Failed to get download size: {}", e);
+            Err("Failed to get download size".to_owned())
+        }
+    }
 }
-
 
 struct AdnlChecksum {
     sum: u64,
