@@ -320,8 +320,8 @@ fn main() {
             };
 
             let dev = protocol_adnl::do_flash(&handle).expect("Failed to flash");
-
             let handle = dev.open().expect("Failed to open usb device");
+            protocol_adnl::check_in_mode(&handle, protocol_adnl::BootMode::Tpl).expect("Not in correct mode for flash");
             protocol_adnl::oem_mwrite(&handle, 0, input);
             if reboot {
                 protocol_adnl::device_reboot(&handle);
@@ -340,6 +340,7 @@ fn main() {
                 _ => protocol_adnl::OemWriteType::File(wic_p.to_str().unwrap()),
             };
 
+            protocol_adnl::check_in_mode(&handle, protocol_adnl::BootMode::Tpl).expect("Not in correct mode for flash-adnl");
             protocol_adnl::oem_mwrite(&handle, 0, input);
             if reboot {
                 protocol_adnl::device_reboot(&handle);
@@ -364,6 +365,7 @@ fn main() {
 
             let dev = protocol_adnl::erase_emmc(&handle).expect("Failed to invalidate mbr");
             let handle = dev.open().expect("Failed to open usb device");
+            protocol_adnl::check_in_mode(&handle, protocol_adnl::BootMode::Tpl).expect("Not in correct mode for flash-adnl");
             protocol_adnl::oem_mwrite(&handle, 0, input);
             if reboot {
                 protocol_adnl::device_reboot(&handle);

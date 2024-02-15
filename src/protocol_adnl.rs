@@ -1,3 +1,4 @@
+use std::fmt::format;
 use std::fs::File;
 use std::io::Write;
 use std::sync::mpsc::SyncSender;
@@ -299,41 +300,24 @@ pub fn oem_mread(h: &Handle, offset: u64, len: u64) {
 }
 
 pub fn devices(h: &Handle) {
-    let timeout = Duration::from_millis(3000);
-    if let Ok(len) = h.write_bulk(
-        ADNL_OUT_EP,
-        String::from(CmdAdnl::Devices).as_bytes(),
-        timeout,
-    ) {
-        println!("Wrote {len} bytes!");
-    } else {
-        println!("Failed to write");
-        return;
-    }
-    let mut buf = [0u8; 512];
-    match h.read_bulk(ADNL_IN_EP, &mut buf, timeout) {
-        Ok(len) => {
-            println!("Read {len} bytes!");
-            println!("{}", String::from_utf8_lossy(&buf));
-        }
-        Err(e) => println!("Failed to read: {:?}", e),
-    }
+
+    // check_in_mode(h, BootMode::Bl1).unwrap();
+    // check_in_mode(h, BootMode::Bl2).unwrap();
 }
 
-fn do_read_bulk(h: &Handle) -> Result<String, String> {
+fn do_read_bulk(h: &Handle) -> Result<Vec<u8>, String> {
     let timeout = Duration::from_millis(3000);
     let mut buf = [0u8; 512];
     let result = match h.read_bulk(ADNL_IN_EP, &mut buf, timeout) {
-        Ok(_len) => {
+        Ok(len) => {
             let s = String::from_utf8_lossy(&buf);
-            // println!("{}",s);
             // get the first item as responses are a bit strange from the device (and is probably a bug)
             // OKAY0x3F800<nul>max-download-size<nul>serialno<nul>product<nul>AMLOGIC<nul>identify<nul>getc
             if let Some(r) = s.split('\0').next() {
                 let re = Regex::new(r"(?<status>(OKAY|FAIL|DATA))(?<msg>.*)").unwrap();
                 match re.captures(r) {
                     Some(cap) => match &cap["status"] {
-                        "OKAY" | "DATA" => Ok(String::from(&cap["msg"])),
+                        "OKAY" | "DATA" => Ok(buf[4..len].to_vec()),
                         "FAIL" => Err(String::from(&cap["msg"])),
                         _ => Err("Unknown response".into()),
                     },
@@ -399,24 +383,13 @@ pub fn do_bootloader_flash(h: &Handle) -> Result<Device<GlobalContext>, String> 
     let data = UBOOT_USB_BIN_SIGNED;
 
     //// bl1_boot -f uboot.bin.usb.signed
-    do_write_blk_cmd(h, "getvar:identify").unwrap();
-    do_read_bulk(h).unwrap();
-
-    do_write_blk_cmd(h, "getvar:identify").unwrap();
-    do_read_bulk(h).unwrap();
+    check_in_mode(h, BootMode::Bl1).expect("Should be in BL1 mode");
+    check_in_mode(h, BootMode::Bl1).expect("Should be in BL1 mode");
 
     do_write_blk_cmd(h, "getvar:getchipinfo-1").unwrap();
     do_read_bulk(h).unwrap();
 
-    do_write_blk_cmd(h, "getvar:downloadsize").unwrap();
-    // let mut dlsize: u32 = 0;
-    let mut dlsize = match do_read_bulk(h) {
-        Ok(msg) => u32::from_str_radix(msg.to_lowercase().replace("0x", "").as_str(), 16).unwrap(),
-        Err(e) => {
-            println!("Failed to get download size: {}", e);
-            return Err("Failed to get download size".to_owned());
-        }
-    };
+    let mut dlsize = get_download_size(h).expect("Failed to get download size");
 
     do_write_blk_cmd(h, format!("download:{:08X}", dlsize).as_str()).unwrap();
     do_read_bulk(h).unwrap();
@@ -429,12 +402,10 @@ pub fn do_bootloader_flash(h: &Handle) -> Result<Device<GlobalContext>, String> 
 
     do_write_blk_cmd(h, "boot").unwrap();
     do_read_bulk(h).unwrap();
-    ////
 
+    // wait for the device to boot again
     std::thread::sleep(Duration::from_millis(500));
-    do_write_blk_cmd(h, "getvar:identify").unwrap();
-    do_read_bulk(h).ok();
-
+    check_in_mode(h, BootMode::Bl2).expect("Should be in BL2 mode");
     // this next part is 'reveresed engineered from a USB trace of the adnl tool
     // so it could be...fragile
     do_write_blk_cmd(h, "getvar:cbw").unwrap();
@@ -446,6 +417,7 @@ pub fn do_bootloader_flash(h: &Handle) -> Result<Device<GlobalContext>, String> 
         addr: u32,
         size: usize,
         last: bool,
+        mode: BootMode
     }
 
     let offsets = [
@@ -453,51 +425,61 @@ pub fn do_bootloader_flash(h: &Handle) -> Result<Device<GlobalContext>, String> 
             addr: 0x64000,
             size: 0x9600,
             last: false,
+            mode: BootMode::Bl2,
         },
         WriteDef {
             addr: 0x8c000,
             size: 0x9600,
             last: false,
+            mode: BootMode::Bl2,
         },
         WriteDef {
             addr: 0x96000,
             size: 0x9600,
             last: false,
+            mode: BootMode::Bl2,
         },
         WriteDef {
             addr: 0x6e000,
             size: 0x9600,
             last: false,
+            mode: BootMode::Bl2,
         },
         WriteDef {
             addr: 0x78000,
             size: 0x9600,
             last: false,
+            mode: BootMode::Bl2,
         },
         WriteDef {
             addr: 0x82000,
             size: 0x9600,
             last: false,
+            mode: BootMode::Bl2,
         },
         WriteDef {
             addr: 0x42000,
             size: 0x11000,
             last: false,
+            mode: BootMode::Bl2,
         },
         WriteDef {
             addr: 0x53000,
             size: 0x11000,
             last: false,
+            mode: BootMode::Bl2e,
         },
         WriteDef {
             addr: 0xa4000,
             size: 0x8000,
             last: false,
+            mode: BootMode::Bl2e,
         },
         WriteDef {
             addr: 0xac000,
             size: 0x26C260,
             last: true,
+            mode: BootMode::Bl2e, // this one is not actually checked/used
         },
     ]
     .into_iter();
@@ -528,8 +510,9 @@ pub fn do_bootloader_flash(h: &Handle) -> Result<Device<GlobalContext>, String> 
         // this breaks the flow on the last iteration as this the previous
         // commmand appears to trigger bl33 to boot
         if !wd.last {
-            do_write_blk_cmd(h, "getvar:identify").unwrap();
-            do_read_bulk(h).unwrap();
+            // do_write_blk_cmd(h, "getvar:identify").unwrap();
+            // do_read_bulk(h).unwrap();
+            check_in_mode(h, wd.mode).unwrap();
             do_write_blk_cmd(h, "getvar:cbw").unwrap();
             do_read_bulk(h).unwrap();
         }
@@ -677,6 +660,64 @@ pub fn device_reboot(h: &Handle) {
     do_write_blk_cmd(h, "reboot").unwrap();
     do_read_bulk(h).unwrap();
 }
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum BootMode {
+    Bl1,
+    Bl2,
+    Bl2e,  // some undefined intermediate mode I guess
+    Tpl,
+
+    Invalid
+}
+
+impl From<Vec<u8>> for BootMode {
+    fn from(value: Vec<u8>) -> Self {
+        if value.len() < 4 {
+            return BootMode::Invalid;
+        }
+
+        match value[0..4] {
+            [6,0,0,0] => BootMode::Bl1,
+            [6,0,0,8] => BootMode::Bl2,
+            [6,0,0,12] => BootMode::Bl2e,
+            [6,0,0,16] => BootMode::Tpl,
+            _ => BootMode::Invalid,
+        }
+    }
+}
+
+
+fn identify(h: &Handle) -> BootMode {
+    do_write_blk_cmd(h, "getvar:identify").unwrap();
+    let mode = do_read_bulk(h).unwrap();
+    BootMode::from(mode)
+}
+
+pub fn check_in_mode(h: &Handle, expected: BootMode) -> Result<(), String> {
+    let mode = identify(h);
+    if mode != expected {
+        return Err(format!("Expected Mode '{:?}', Was in {:?}", expected, mode))
+    }
+    Ok(())
+}
+
+fn get_download_size(h: &Handle) -> Result<u32, String> {
+
+  do_write_blk_cmd(h, "getvar:downloadsize").unwrap();
+  match do_read_bulk(h) {
+      Ok(msg) => {
+          let m = String::from_utf8_lossy(&msg);
+          let s = m.split('\0').next().unwrap();
+          Ok(u32::from_str_radix(s.to_lowercase().replace("0x", "").as_str(), 16).unwrap())
+      },
+      Err(e) => {
+          println!("Failed to get download size: {}", e);
+          return Err("Failed to get download size".to_owned());
+      }
+  }
+}
+
 
 struct AdnlChecksum {
     sum: u64,
