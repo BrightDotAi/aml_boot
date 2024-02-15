@@ -1,12 +1,15 @@
+use std::fs::File;
 use std::io::Write;
+use std::sync::mpsc::SyncSender;
 use std::{
     io::{self, BufRead, BufReader, Read},
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
-    thread::{JoinHandle},
+    thread::JoinHandle,
     time::{Duration, Instant},
 };
 
+use bzip2::bufread::MultiBzDecoder;
 use regex::Regex;
 use rusb::{Device, GlobalContext};
 
@@ -63,27 +66,21 @@ pub enum OemWriteType<'a> {
     Bzip2(&'a str),
 }
 
-fn bzip2_threads(rx: Receiver<Vec<u8>>, tx2: Sender<Vec<u8>>) {
-    let mut total = 0;
+// this just aggregates the data from the chunker thread to ensure
+// there is always 0x20000 bytes of data to write until the last chunk
+// or if the data is smaller, that works too
+fn aggregator_thread(rx: Receiver<Vec<u8>>, tx2: Sender<Vec<u8>>) {
     let mut working_set: Vec<u8> = Vec::new();
     let mut is_done = false;
-    loop {
-        match rx.recv() {
-            Ok(buf) => {
-                if buf.is_empty() {
-                    is_done = true;
-                } else {
-                    let mut tvec: Vec<u8> = Vec::new();
-                    buf.as_slice()
-                        .read_to_end(&mut tvec)
-                        .expect("Failed to read data in thread");
-                    working_set.append(&mut tvec);
-                    total += buf.len();
-                }
-            }
-            Err(_e) => {
-                break;
-            }
+    while let Ok(buf) = rx.recv() {
+        if buf.is_empty() {
+            is_done = true;
+        } else {
+            let mut tvec: Vec<u8> = Vec::new();
+            buf.as_slice()
+                .read_to_end(&mut tvec)
+                .expect("Failed to read data in thread");
+            working_set.append(&mut tvec);
         }
 
         if working_set.len() >= 0x20000 {
@@ -103,44 +100,20 @@ fn bzip2_threads(rx: Receiver<Vec<u8>>, tx2: Sender<Vec<u8>>) {
     }
 }
 
-fn do_write_data(h: &Handle, offset: u64, mut data: impl Read, tx: mpsc::Sender<usize>) {
+fn do_write_data(h: &Handle, offset: u64, data: OemWriteDataType, tx: mpsc::Sender<usize>) {
     let mut offset = offset;
-    let mut buf = [0u8; 0x20000];
 
-    let (tx1, rx1) = mpsc::sync_channel::<Vec<u8>>(25);
+    let (tx1, rx1) = mpsc::sync_channel::<Vec<u8>>(1);
     let (tx2, rx2) = mpsc::channel::<Vec<u8>>();
 
-    let t1 = std::thread::spawn(move || bzip2_threads(rx1, tx2));
-    let mut data_finished = false;
-    let mut sent_work_cnt = 0;
-    // this loop chunks the bzip2 data into the expected 0x20000 byte writeable chunks
-    // for the adnl protocol, the bzip2 threads ensures that we do not try to write anything
-    // until we have a full 0x20000 chunk(s), this with the offset being intervals of 0x20000 appear to
-    // be required, though it's not clear exactly why
+    let t1 = std::thread::spawn(move || aggregator_thread(rx1, tx2));
+    std::thread::spawn(move || chunker_thread(data, tx1));
     loop {
-        if !data_finished {
-            if let Ok(len) = data.read(&mut buf) {
-                let sent = if len > 0 {
-                    let mut dc = Vec::new();
-                    let _ = dc.write(&buf[0..len]).expect("Failed to write bytes");
-                    tx1.send(dc).is_ok()
-                } else {
-                    data_finished = true;
-                    tx1.send(Vec::new()).is_ok()
-                };
-
-                if sent {
-                    sent_work_cnt += 1;
-                }
-            }
-        }
-
         match rx2.try_recv() {
             Ok(data) => {
                 if data.is_empty() {
                     break;
                 }
-                sent_work_cnt -= 1;
                 do_write_blk_cmd(
                     h,
                     String::from(CmdAdnl::OemMwriteInit(1, offset, data.len() as u64)).as_bytes(),
@@ -154,12 +127,7 @@ fn do_write_data(h: &Handle, offset: u64, mut data: impl Read, tx: mpsc::Sender<
                 tx.send(data.len()).ok();
                 offset += data.len() as u64;
             }
-            Err(_e) => {
-                std::thread::sleep(Duration::from_millis(100));
-                if data_finished && sent_work_cnt <= 0 {
-                    break;
-                }
-            }
+            Err(_e) => {}
         }
     }
     drop(tx);
@@ -184,24 +152,87 @@ fn progress_thread(rx: Receiver<usize>) -> JoinHandle<()> {
     })
 }
 
+enum OemWriteDataType {
+    BzDecoder(MultiBzDecoder<BufReader<File>>),
+    File(BufReader<File>),
+    Buff(Vec<u8>),
+}
+
+impl Read for OemWriteDataType {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            OemWriteDataType::BzDecoder(d) => d.read(buf),
+            OemWriteDataType::File(d) => d.read(buf),
+            OemWriteDataType::Buff(d) => match d.as_slice().read(buf) {
+                Ok(l) => {
+                    d.drain(0..l);
+                    Ok(l)
+                }
+                Err(e) => Err(e),
+            },
+        }
+    }
+
+    fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        match self {
+            OemWriteDataType::BzDecoder(d) => d.read_exact(buf),
+            OemWriteDataType::File(d) => d.read_exact(buf),
+            OemWriteDataType::Buff(d) => {
+                let l = buf.len();
+                match d.as_slice().read_exact(buf) {
+                    Ok(()) => {
+                        d.drain(0..l);
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+        }
+    }
+}
+
+// this loop chunks the bzip2 data into the expected 0x20000 byte writeable chunks
+// for the adnl protocol, the bzip2 threads ensures that we do not try to write anything
+// until we have a full 0x20000 chunk(s), this with the offset being intervals of 0x20000 appear to
+// be required, though it's not clear exactly why
+fn chunker_thread(mut data: OemWriteDataType, notify_tx: SyncSender<Vec<u8>>) {
+    let mut buf = [0u8; 0x20000];
+    loop {
+        if let Ok(len) = data.read(&mut buf) {
+            if len > 0 {
+                let mut dc = Vec::new();
+                let _ = dc.write(&buf[0..len]).expect("Failed to write bytes");
+                notify_tx.send(dc).ok();
+                // this helps keep memory consumption low
+                // and doens't impact overall time as the long pole
+                // is writing out the data to the device
+                std::thread::sleep(Duration::from_millis(10));
+            } else {
+                notify_tx.send(Vec::new()).ok();
+                break;
+            };
+        }
+    }
+}
+
 pub fn oem_mwrite(h: &Handle, offset: u64, input: OemWriteType) {
     use bzip2::bufread;
     let (tx, rx) = std::sync::mpsc::channel::<usize>();
     let progress = progress_thread(rx);
-    match input {
+    let data = match input {
         OemWriteType::Bzip2(file) => {
             let buf = BufReader::new(std::fs::File::open(PathBuf::from(file)).unwrap());
             let bzd = bufread::MultiBzDecoder::new(buf);
-            do_write_data(h, offset, bzd, tx);
+            OemWriteDataType::BzDecoder(bzd)
         }
         OemWriteType::File(file) => {
             let buf = BufReader::new(std::fs::File::open(PathBuf::from(file)).unwrap());
-            do_write_data(h, offset, buf, tx);
+            OemWriteDataType::File(buf)
         }
-        OemWriteType::Raw(data) => {
-            do_write_data(h, offset, data, tx);
-        }
+        OemWriteType::Raw(data) => OemWriteDataType::Buff(data.to_owned()),
     };
+
+    do_write_data(h, offset, data, tx);
     progress.join().expect("Failed to 'join' progress handle");
 }
 
