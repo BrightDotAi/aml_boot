@@ -350,7 +350,11 @@ fn main() {
         }
 
         Command::EraseMMC {} => {
-            protocol_adnl::erase_emmc(&handle).expect("Failed to invalidate mbr");
+            let dev = protocol_adnl::erase_emmc(&handle).expect("Failed to invalidate mbr");
+            if reboot {
+                let handle = dev.open().expect("Failed to open usb device");
+                protocol_adnl::device_reboot(&handle);
+            }
         }
 
         Command::DoItAll { wic } => {

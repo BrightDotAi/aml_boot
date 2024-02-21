@@ -1,9 +1,8 @@
-use std::fmt::format;
 use std::fs::File;
 use std::io::Write;
 use std::sync::mpsc::SyncSender;
 use std::{
-    io::{self, BufRead, BufReader, Read},
+    io::{self, BufReader, Read},
     path::PathBuf,
     sync::mpsc::{self, Receiver, Sender},
     thread::JoinHandle,
@@ -299,8 +298,7 @@ pub fn oem_mread(h: &Handle, offset: u64, len: u64) {
     // println!("{}", buf.len());
 }
 
-pub fn devices(h: &Handle) {
-
+pub fn devices(_h: &Handle) {
     // check_in_mode(h, BootMode::Bl1).unwrap();
     // check_in_mode(h, BootMode::Bl2).unwrap();
 }
@@ -323,12 +321,12 @@ fn do_read_bulk(h: &Handle) -> Result<Vec<u8>, String> {
                     },
                     None => {
                         println!("Failed to find expected response: '{r}'!");
-                        Err("Bad News Bears".into())
+                        Err("Regular expression failed to match".into())
                     }
                 }
             } else {
                 println!("Failed to get expected response: '{}'", s);
-                Err("Bad News Bears".into())
+                Err("Failed to get a valid response".into())
             }
         }
         Err(e) => {
@@ -522,7 +520,6 @@ pub fn do_bootloader_flash(h: &Handle) -> Result<Device<GlobalContext>, String> 
     Ok(wait_for_device_reconnect().expect("Failed to find device after reconnect!"))
 }
 
-// this doesn't actually work unfortunately
 pub fn erase_emmc(h: &Handle) -> Result<Device<GlobalContext>, String> {
     let dev = do_bootloader_flash(h).expect("Failed to flash bootloader(s)");
     let handle = dev.open().expect("Failed to open usb device");
@@ -567,10 +564,7 @@ pub fn erase_emmc(h: &Handle) -> Result<Device<GlobalContext>, String> {
     do_write_blk_cmd(h, buf.as_ref()).expect("Failed to write checksum");
     do_read_bulk(h).unwrap();
 
-    do_write_blk_cmd(h, "reboot").unwrap();
-    do_read_bulk(h).unwrap();
-
-    Ok(wait_for_device_reconnect().expect("Failed to detect device"))
+    Ok(dev)
 }
 
 pub fn do_flash(h: &Handle) -> Result<Device<GlobalContext>, String> {
@@ -627,7 +621,6 @@ fn wait_for_device_reconnect() -> Result<Device<GlobalContext>, String> {
     let max = Duration::from_secs(30);
     let now = Instant::now();
     let curr_dev = find_usb_device().expect("Failed to find adnl device");
-
     println!("Searching for Amlogic USB devices...");
     while now.elapsed() < max {
         let left = 30 - now.elapsed().as_secs();
