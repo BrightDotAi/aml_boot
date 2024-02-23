@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::Write;
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{SyncSender, TryRecvError};
 use std::{
     io::{self, BufReader, Read},
     path::PathBuf,
@@ -66,6 +66,11 @@ pub enum OemWriteType<'a> {
     Bzip2(&'a str),
 }
 
+// this is primarily how much data to 'prime' the write thread with
+// larger numebr causes longer delay before writes start
+// in my testing, 50MB was the quickest between decompress+write
+const WORKING_CHUNK_SIZE: usize = 50 * 1024 * 1024;
+
 // this just aggregates the data from the chunker thread to ensure
 // there is always 0x20000 bytes of data to write until the last chunk
 // or if the data is smaller, that works too
@@ -83,15 +88,15 @@ fn aggregator_thread(rx: Receiver<Vec<u8>>, tx2: Sender<Vec<u8>>) {
             working_set.append(&mut tvec);
         }
 
-        if working_set.len() >= 0x20000 {
+        if working_set.len() >= WORKING_CHUNK_SIZE {
             let mut to_drop = 0;
-            for (ix, ch) in working_set.chunks_exact(0x20000).enumerate() {
+            for (ix, ch) in working_set.chunks_exact(WORKING_CHUNK_SIZE).enumerate() {
                 tx2.send(ch.to_vec()).unwrap();
                 to_drop = ix + 1;
             }
             // drop what we just sent down the pipe
-            working_set.drain(0..(to_drop * 0x20000));
-        } else if is_done && working_set.len() < 0x20000 {
+            working_set.drain(0..(to_drop * WORKING_CHUNK_SIZE));
+        } else if is_done && working_set.len() < WORKING_CHUNK_SIZE {
             tx2.send(working_set.clone()).unwrap();
             working_set.clear();
             tx2.send(Vec::new()).unwrap();
@@ -120,11 +125,15 @@ fn do_write_data(h: &Handle, offset: u64, data: OemWriteDataType, tx: mpsc::Send
                 )
                 .unwrap();
                 do_read_bulk(h).unwrap();
-                do_write_blk_cmd(h, String::from(CmdAdnl::OemMwriteRequest).as_bytes()).unwrap();
-                do_read_bulk(h).unwrap();
-                do_write_blk_cmd(h, data.as_slice()).expect("Failed to write data");
-                do_read_bulk(h).unwrap();
-                tx.send(data.len()).ok();
+                // write the data into the expected chunks size
+                for ch in data.chunks(0x20000) {
+                    do_write_blk_cmd(h, String::from(CmdAdnl::OemMwriteRequest).as_bytes())
+                        .unwrap();
+                    do_read_bulk(h).unwrap();
+                    do_write_blk_cmd(h, ch).expect("Failed to write data");
+                    do_read_bulk(h).unwrap();
+                    tx.send(ch.len()).ok();
+                }
                 offset += data.len() as u64;
             }
             Err(_e) => {}
@@ -138,13 +147,26 @@ fn progress_thread(rx: Receiver<usize>) -> JoinHandle<()> {
     std::thread::spawn(move || {
         let mut total = 0;
         let now = Instant::now();
-        while let Ok(by) = rx.recv() {
-            total += by;
-            let n = now.elapsed();
+        loop {
+            match rx.try_recv() {
+                Ok(by) => {
+                    total += by;
+                }
+                Err(TryRecvError::Empty) => {
+                    // just backoff a little bit until we receive data
+                    // there are still instances where the write thread is
+                    // waiting for more data from the aggregator thread, so
+                    // just add a little backoff to avoid a tight busy loop here
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(TryRecvError::Disconnected) => {
+                    break;
+                }
+            }
             print!(
-                "\rWrote {:>10}, Elapsed {:<03.3} seconds",
+                "\rWrote {:>10}, Elapsed {:>6.02} seconds",
                 total,
-                n.as_millis() as f64 / 1000.0
+                now.elapsed().as_millis() as f64 / 1000.0
             );
             io::stdout().flush().ok();
         }
