@@ -112,7 +112,7 @@ enum Command {
     /// put in downloader mode
     #[clap(verbatim_doc_comment)]
     Flash {
-        #[arg(short, long, index = 1, default_value = "")]
+        #[arg(index = 1, default_value = "")]
         wic: String,
     },
 
@@ -120,7 +120,7 @@ enum Command {
     /// put in adnl mode
     #[clap(verbatim_doc_comment)]
     FlashAdnl {
-        #[arg(short, long, index = 1, default_value = "")]
+        #[arg(index = 1, default_value = "")]
         wic: String,
     },
 
@@ -132,7 +132,7 @@ enum Command {
     #[clap(verbatim_doc_comment)]
     /// Erase enough emmc to fully reflash device
     DoItAll {
-        #[arg(short, long, index = 1, default_value = "")]
+        #[arg(index = 1, default_value = "")]
         wic: String,
     },
 }
