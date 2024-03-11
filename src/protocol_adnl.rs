@@ -633,10 +633,12 @@ fn find_usb_device(exclude_address: Option<u8>) -> Result<Device<GlobalContext>,
         let vid = des.vendor_id();
         let pid = des.product_id();
 
-        vid == USB_VID_AMLOGIC && matches!(pid, crate::USB_PID_AML_DNL) && match exclude_address {
-            None => true,
-            Some(addr) => addr != dev.address(),
-        }
+        vid == USB_VID_AMLOGIC
+            && matches!(pid, crate::USB_PID_AML_DNL)
+            && match exclude_address {
+                None => true,
+                Some(addr) => addr != dev.address(),
+            }
     }) {
         Ok(dev)
     } else {
@@ -644,7 +646,16 @@ fn find_usb_device(exclude_address: Option<u8>) -> Result<Device<GlobalContext>,
     }
 }
 
-fn rediscover(prev_address: Option<u8>) -> Result<(Device<GlobalContext>, DeviceDescriptor, DeviceHandle<GlobalContext>), String> {
+fn rediscover(
+    prev_address: Option<u8>,
+) -> Result<
+    (
+        Device<GlobalContext>,
+        DeviceDescriptor,
+        DeviceHandle<GlobalContext>,
+    ),
+    String,
+> {
     // wait for the device to show
     // if prev_address argument is valid, we use it for checking if the discovered device has a different address
     let max = Duration::from_secs(30);
@@ -689,7 +700,9 @@ fn rediscover(prev_address: Option<u8>) -> Result<(Device<GlobalContext>, Device
     }
 
     let config_desc = dev.config_descriptor(0).unwrap();
-    handle.set_active_configuration(config_desc.number()).unwrap();
+    handle
+        .set_active_configuration(config_desc.number())
+        .unwrap();
 
     for interface in config_desc.interfaces() {
         for interface_desc in interface.descriptors() {
@@ -704,7 +717,9 @@ fn rediscover(prev_address: Option<u8>) -> Result<(Device<GlobalContext>, Device
 
             // println!(" - kernel driver? {}", has_kernel_driver);
             handle.claim_interface(iface).unwrap();
-            handle.set_alternate_setting(iface, interface_desc.setting_number()).unwrap();
+            handle
+                .set_alternate_setting(iface, interface_desc.setting_number())
+                .unwrap();
         }
     }
 
@@ -713,7 +728,14 @@ fn rediscover(prev_address: Option<u8>) -> Result<(Device<GlobalContext>, Device
     Ok((dev, des, handle))
 }
 
-pub fn discover() -> Result<(Device<GlobalContext>, DeviceDescriptor, DeviceHandle<GlobalContext>), String> {
+pub fn discover() -> Result<
+    (
+        Device<GlobalContext>,
+        DeviceDescriptor,
+        DeviceHandle<GlobalContext>,
+    ),
+    String,
+> {
     rediscover(None)
 }
 
