@@ -11,7 +11,7 @@ use std::{
 
 use bzip2::bufread::MultiBzDecoder;
 use regex::Regex;
-use rusb::{Device, GlobalContext};
+use rusb::{Device, DeviceDescriptor, DeviceHandle, GlobalContext};
 
 use crate::{protocol::Handle, USB_VID_AMLOGIC};
 
@@ -399,8 +399,9 @@ fn do_write_blk_cmd<'a>(h: &Handle, cmd: impl Into<BulkCommand<'a>>) -> Result<u
     })
 }
 
-pub fn do_bootloader_flash(h: &Handle) -> Result<Device<GlobalContext>, String> {
+pub fn do_bootloader_flash(h: &mut Handle) -> Result<(), String> {
     let data = UBOOT_USB_BIN_SIGNED;
+    let prev_addr = h.device().address();
 
     //// bl1_boot -f uboot.bin.usb.signed
     check_in_mode(h, BootMode::Bl1).expect("Should be in BL1 mode");
@@ -539,13 +540,13 @@ pub fn do_bootloader_flash(h: &Handle) -> Result<Device<GlobalContext>, String> 
     }
 
     // the device will 'boot' and reconnect as a different USB device number
-    Ok(wait_for_device_reconnect().expect("Failed to find device after reconnect!"))
+    let (_dev, _des, handle) = rediscover(Some(prev_addr)).unwrap();
+    *h = handle; // update the handle
+    Ok(())
 }
 
-pub fn erase_emmc(h: &Handle) -> Result<Device<GlobalContext>, String> {
-    let dev = do_bootloader_flash(h).expect("Failed to flash bootloader(s)");
-    let handle = dev.open().expect("Failed to open usb device");
-    let h = &handle;
+pub fn erase_emmc(h: &mut Handle) -> Result<(), String> {
+    do_bootloader_flash(h).expect("Failed to flash bootloader(s)");
 
     // this will wipe the boot partitions
     do_write_blk_cmd(h, "oem disk_initial 1").unwrap();
@@ -586,14 +587,11 @@ pub fn erase_emmc(h: &Handle) -> Result<Device<GlobalContext>, String> {
     do_write_blk_cmd(h, buf.as_ref()).expect("Failed to write checksum");
     do_read_bulk(h).unwrap();
 
-    Ok(dev)
+    Ok(())
 }
 
-pub fn do_flash(h: &Handle) -> Result<Device<GlobalContext>, String> {
-    let dev = do_bootloader_flash(h).expect("Failed to flash bootloader(s)");
-    let handle = dev.open().expect("Failed to open usb device");
-    let h = &handle;
-
+pub fn do_flash(h: &mut Handle) -> Result<(), String> {
+    do_bootloader_flash(h).expect("Failed to flash bootloader(s)");
     let data = UBOOT_BIN_SIGNED;
 
     let dlsize = data.len() as u32;
@@ -618,19 +616,29 @@ pub fn do_flash(h: &Handle) -> Result<Device<GlobalContext>, String> {
     do_write_blk_cmd(h, buf.as_ref()).expect("Failed to write checksum");
     do_read_bulk(h).unwrap();
 
+    // get current device address before reboot, for usb rediscovering
+    let prev_addr = h.device().address();
+
     do_write_blk_cmd(h, "reboot").unwrap();
     do_read_bulk(h).unwrap();
 
-    Ok(wait_for_device_reconnect().expect("Failed to detect device"))
+    let (_dev, _des, handle) = rediscover(Some(prev_addr)).unwrap();
+    *h = handle; // update the handle
+    Ok(())
 }
 
-fn find_usb_device() -> Result<Device<GlobalContext>, String> {
+fn find_usb_device(exclude_address: Option<u8>) -> Result<Device<GlobalContext>, String> {
     if let Some(dev) = rusb::devices().unwrap().iter().find(|dev| {
         let des = dev.device_descriptor().unwrap();
         let vid = des.vendor_id();
         let pid = des.product_id();
 
-        vid == USB_VID_AMLOGIC && matches!(pid, crate::USB_PID_AML_DNL)
+        vid == USB_VID_AMLOGIC
+            && matches!(pid, crate::USB_PID_AML_DNL)
+            && match exclude_address {
+                None => true,
+                Some(addr) => addr != dev.address(),
+            }
     }) {
         Ok(dev)
     } else {
@@ -638,37 +646,97 @@ fn find_usb_device() -> Result<Device<GlobalContext>, String> {
     }
 }
 
-fn wait_for_device_reconnect() -> Result<Device<GlobalContext>, String> {
-    // wait for this device to leave
+fn rediscover(
+    prev_address: Option<u8>,
+) -> Result<
+    (
+        Device<GlobalContext>,
+        DeviceDescriptor,
+        DeviceHandle<GlobalContext>,
+    ),
+    String,
+> {
+    // wait for the device to show
+    // if prev_address argument is valid, we use it for checking if the discovered device has a different address
     let max = Duration::from_secs(30);
+    let fallback_delay = Duration::from_secs(5); // the fallback is for Windows only
     let now = Instant::now();
-    let curr_dev = find_usb_device().expect("Failed to find adnl device");
-    println!("Searching for Amlogic USB devices...");
-    while now.elapsed() < max {
+
+    if prev_address.is_none() {
+        println!("Searching for Amlogic USB devices...");
+    }
+
+    let mut exclude_addr = prev_address;
+    let dev = loop {
+        let elapsed = now.elapsed();
+        if elapsed >= max {
+            return Err("Failed to find device".into());
+        } else if std::env::consts::OS == "windows" && now.elapsed() >= fallback_delay {
+            // On Windows, even if the device has transitioned into TPL, we still get the device
+            // with the same address, which seems a libusb's platform dependent behavior. To
+            // workaround this, we give rediscover a fallback_delay, after which we ignore the
+            // previous address and discover any device.
+            exclude_addr = None;
+        }
+
         let left = 30 - now.elapsed().as_secs();
-        print!("Remaing time: {:<3}s\r", left);
+        print!("Remaining time: {:<3}s\r", left);
         std::io::stdout().flush().ok();
-        if let Ok(dev) = find_usb_device() {
-            if curr_dev.address() == dev.address() {
-                std::thread::sleep(Duration::from_millis(100));
-                continue;
-            } else {
-                std::thread::sleep(Duration::from_millis(250));
-                let ds = dev.device_descriptor().expect("Failed to get descriptor");
-                let vid = ds.vendor_id();
-                let pid = ds.product_id();
-                println!(
-                    "\nFound {vid:04x}:{pid:04x} on bus {:03}, device {:03}",
-                    dev.bus_number(),
-                    dev.address(),
-                );
-                return Ok(dev);
-            }
+
+        if let Ok(dev) = find_usb_device(exclude_addr) {
+            break dev;
         } else {
             std::thread::sleep(Duration::from_millis(100));
         }
+    };
+
+    let des = dev.device_descriptor().expect("Failed to get descriptor");
+    let mut handle = dev.open().expect("Error opening USB device {e:?}");
+
+    // configure the endpoints
+    let nb_configs = des.num_configurations();
+    if nb_configs < 1 {
+        return Err("The device has no configuration".into());
     }
-    Err("Failed to find device".into())
+
+    let config_desc = dev.config_descriptor(0).unwrap();
+    handle
+        .set_active_configuration(config_desc.number())
+        .unwrap();
+
+    for interface in config_desc.interfaces() {
+        for interface_desc in interface.descriptors() {
+            let iface = interface_desc.interface_number();
+            // let has_kernel_driver = match handle.kernel_driver_active(iface) {
+            //     Ok(true) => {
+            //         handle.detach_kernel_driver(iface).ok();
+            //         true
+            //     }
+            //     _ => false,
+            // };
+
+            // println!(" - kernel driver? {}", has_kernel_driver);
+            handle.claim_interface(iface).unwrap();
+            handle
+                .set_alternate_setting(iface, interface_desc.setting_number())
+                .unwrap();
+        }
+    }
+
+    handle.reset().unwrap();
+
+    Ok((dev, des, handle))
+}
+
+pub fn discover() -> Result<
+    (
+        Device<GlobalContext>,
+        DeviceDescriptor,
+        DeviceHandle<GlobalContext>,
+    ),
+    String,
+> {
+    rediscover(None)
 }
 
 pub fn device_reboot(h: &Handle) {

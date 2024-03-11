@@ -112,7 +112,7 @@ enum Command {
     /// put in downloader mode
     #[clap(verbatim_doc_comment)]
     Flash {
-        #[arg(short, long, index = 1, default_value = "")]
+        #[arg(index = 1, default_value = "")]
         wic: String,
     },
 
@@ -120,7 +120,7 @@ enum Command {
     /// put in adnl mode
     #[clap(verbatim_doc_comment)]
     FlashAdnl {
-        #[arg(short, long, index = 1, default_value = "")]
+        #[arg(index = 1, default_value = "")]
         wic: String,
     },
 
@@ -132,7 +132,7 @@ enum Command {
     #[clap(verbatim_doc_comment)]
     /// Erase enough emmc to fully reflash device
     DoItAll {
-        #[arg(short, long, index = 1, default_value = "")]
+        #[arg(index = 1, default_value = "")]
         wic: String,
     },
 }
@@ -154,21 +154,14 @@ struct Cli {
 fn main() {
     let cmd = Cli::parse().cmd;
     let reboot = Cli::parse().reboot;
-    println!("Searching for Amlogic USB devices...");
-    let dev = rusb::devices()
-        .unwrap()
-        .iter()
-        .find(|dev| {
-            let des = dev.device_descriptor().unwrap();
-            let vid = des.vendor_id();
-            let pid = des.product_id();
 
-            vid == USB_VID_AMLOGIC
-                && matches!(pid, USB_PID_GX_CHIP | USB_PID_AML_DNL | USB_PID_GADGET)
-        })
-        .expect("Cannot find Amlogic USB device");
-
-    let des = dev.device_descriptor().unwrap();
+    let (dev, des, mut handle) = match protocol_adnl::discover() {
+        Ok(t) => t,
+        Err(e) => {
+            println!("Device not found: {}", e);
+            return;
+        }
+    };
     let vid = des.vendor_id();
     let pid = des.product_id();
 
@@ -191,7 +184,6 @@ fn main() {
     // TODO: Not sure if this is sensible, or whether to use different
     // timeouts per command...
     let timeout = Duration::from_millis(2500);
-    let handle = dev.open().expect("Error opening USB device {e:?}");
 
     if let Ok(p) = handle.read_product_string_ascii(&des) {
         println!("Product string: {p}");
@@ -319,8 +311,7 @@ fn main() {
                 _ => protocol_adnl::OemWriteType::File(wic_p.to_str().unwrap()),
             };
 
-            let dev = protocol_adnl::do_flash(&handle).expect("Failed to flash");
-            let handle = dev.open().expect("Failed to open usb device");
+            protocol_adnl::do_flash(&mut handle).expect("Failed to flash");
             protocol_adnl::check_in_mode(&handle, protocol_adnl::BootMode::Tpl)
                 .expect("Not in correct mode for flash");
             protocol_adnl::oem_mwrite(&handle, 0, input);
@@ -350,9 +341,8 @@ fn main() {
         }
 
         Command::EraseMMC {} => {
-            let dev = protocol_adnl::erase_emmc(&handle).expect("Failed to invalidate mbr");
+            protocol_adnl::erase_emmc(&mut handle).expect("Failed to invalidate mbr");
             if reboot {
-                let handle = dev.open().expect("Failed to open usb device");
                 protocol_adnl::device_reboot(&handle);
             }
         }
@@ -369,8 +359,7 @@ fn main() {
                 _ => protocol_adnl::OemWriteType::File(wic_p.to_str().unwrap()),
             };
 
-            let dev = protocol_adnl::erase_emmc(&handle).expect("Failed to invalidate mbr");
-            let handle = dev.open().expect("Failed to open usb device");
+            protocol_adnl::erase_emmc(&mut handle).expect("Failed to invalidate mbr");
             protocol_adnl::check_in_mode(&handle, protocol_adnl::BootMode::Tpl)
                 .expect("Not in correct mode for flash-adnl");
             protocol_adnl::oem_mwrite(&handle, 0, input);
