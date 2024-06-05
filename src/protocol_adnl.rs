@@ -321,8 +321,8 @@ pub fn oem_mread(h: &Handle, offset: u64, len: u64) {
 }
 
 pub fn devices(_h: &Handle) {
-    // check_in_mode(h, BootMode::Bl1).unwrap();
-    // check_in_mode(h, BootMode::Bl2).unwrap();
+    let mode = identify(_h);
+    println!("Boot mode: {:?}", mode);
 }
 
 fn do_read_bulk(h: &Handle) -> Result<Vec<u8>, String> {
