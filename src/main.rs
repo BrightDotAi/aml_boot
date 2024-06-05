@@ -207,9 +207,7 @@ fn main() {
         }
         Command::Info => {
             println!("\n=======\n");
-            // protocol::info(&handle, timeout);
             protocol_adnl::devices(&handle);
-            // protocol_adnl::oem_mwrite(&handle);
             println!();
         }
         Command::ChipInfo => {
