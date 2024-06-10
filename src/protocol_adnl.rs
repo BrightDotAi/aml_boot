@@ -700,9 +700,36 @@ fn rediscover(
     }
 
     let config_desc = dev.config_descriptor(0).unwrap();
-    handle
-        .set_active_configuration(config_desc.number())
-        .unwrap();
+
+    // Note: set_active_configuration() may fail with rusb::Error::Busy, which means
+    // interfaces are currently claimed. This is a known issue with libusb: "When
+    // libusb presents a device handle to an application, there is a chance that the
+    // corresponding device may be in unconfigured state."
+    // (https://libusb.sourceforge.io/api-1.0/libusb_caveats.html)
+    // This issue happens mostly on Linux. To work around this, we retry the operation
+    // a few times.
+
+    let mut retries = 0;
+    let max_retries = 3;
+
+    while retries < max_retries {
+        match handle.set_active_configuration(config_desc.number()) {
+            Ok(_) => break,
+            Err(e) => {
+                retries += 1;
+                if e != rusb::Error::Busy {
+                    panic!("Failed to set active configuration due to: {:?}", e);
+                } else if retries >= max_retries {
+                    panic!("Failed to set active configuration after {} retries: {:?}", max_retries, e);
+                } else {
+                    std::thread::sleep(Duration::from_secs(1));
+
+                    // Turn on this, you will see clearly how many times it retries (frequently on Linux!)
+                    // println!("\x1b[93mFailed to set active configuration: {:?}, retry ...\x1b[0m", e);
+                }
+            }
+        }
+    }
 
     for interface in config_desc.interfaces() {
         for interface_desc in interface.descriptors() {
