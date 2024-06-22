@@ -1,0 +1,50 @@
+
+name: Docker Build
+env:
+  GITHUB_USERNAME: auto-brightai
+
+on:
+
+  pull_request:
+    branches: s905x4-support
+  push:
+    branches: [s905x4-support, rws/**]
+    tags:
+      - '*'
+  workflow_dispatch:
+
+jobs:
+  buildx:
+    timeout-minutes: 45
+    runs-on: [self-hosted, "mgmt-automation-xlarge"]
+    steps:
+      # Get the repositery's code
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.PAT_ORG_ADMIN_REPO_ALL }}
+
+      # checkout the private repo containing the action to run
+      - name: Checkout GitHub Action Repo
+        uses: actions/checkout@v2
+        with:
+          repository: BrightDotAi/github-actions
+          ref: v2.4.0
+          token: ${{ secrets.PAT_ORG_ADMIN_REPO_ALL }} # stored in GitHub secrets
+          path: .github/common
+      - name: Configure Git credentials
+        uses: de-vri-es/setup-git-credentials@v2.0.8
+        with:
+          credentials: |
+            https://${{ env.GITHUB_USERNAME }}:${{ secrets.PAT_ORG_ADMIN_REPO_ALL }}@github.com/
+
+      - name: Docker Buildx Build
+        uses: ./.github/common/ci/buildx
+        with:
+          image_name: brightai/aml_boot
+          registry_username: ${{ secrets.BRIGHTAI_DOCKER_HUB_BOT_USER }}
+          registry_password: ${{ secrets.BRIGHTAI_DOCKER_HUB_BOT_PW }}
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            GITHUB_USERNAME=${{ env.GITHUB_USERNAME }}
+            GITHUB_PAT=${{ secrets.PAT_ORG_ADMIN_REPO_ALL }}
