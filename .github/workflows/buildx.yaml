@@ -39,7 +39,7 @@ jobs:
             https://${{ env.GITHUB_USERNAME }}:${{ secrets.PAT_ORG_ADMIN_REPO_ALL }}@github.com/
 
       - name: Docker Buildx Build
-        uses: ./.github/common/ci/buildx
+        uses: ./.github/actions/common/ci/buildx
         with:
           image_name: brightai/aml_boot
           registry_username: ${{ secrets.BRIGHTAI_DOCKER_HUB_BOT_USER }}
