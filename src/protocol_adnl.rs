@@ -10,10 +10,18 @@ use std::{
 };
 
 use bzip2::bufread::MultiBzDecoder;
+use lazy_static::lazy_static;
 use regex::Regex;
 use rusb::{Device, DeviceDescriptor, DeviceHandle, GlobalContext};
 
 use crate::{protocol::Handle, USB_VID_AMLOGIC};
+
+lazy_static! {
+    // Regex to match against "Failed to read bulk data: capacity < partStartOff + imgSize 0x:..." in oem mwrite response
+    static ref CAPACITY_REGEX: Regex = Regex::new(r"capacity < partStartOff \+ imgSize 0x:(?<capacity>[0-9a-f]+) ").unwrap();
+    // Regex to match against "OKAY0x3F800<nul>..." etc. in read bulk response
+    static ref READ_BULK_REGEX: Regex = Regex::new(r"(?<status>(OKAY|FAIL|DATA))(?<msg>.*)").unwrap();
+}
 
 // IN is device to host
 const ADNL_IN_EP: u8 = 0x81;
@@ -105,7 +113,7 @@ fn aggregator_thread(rx: Receiver<Vec<u8>>, tx2: Sender<Vec<u8>>) {
     }
 }
 
-fn do_write_data(h: &Handle, offset: u64, data: OemWriteDataType, tx: mpsc::Sender<usize>) {
+fn do_write_data(h: &Handle, offset: u64, data: OemWriteDataType, tx: mpsc::Sender<usize>) -> Result<(), String>{
     let mut offset = offset;
 
     let (tx1, rx1) = mpsc::sync_channel::<Vec<u8>>(1);
@@ -124,7 +132,7 @@ fn do_write_data(h: &Handle, offset: u64, data: OemWriteDataType, tx: mpsc::Send
                     String::from(CmdAdnl::OemMwriteInit(1, offset, data.len() as u64)).as_bytes(),
                 )
                 .unwrap();
-                do_read_bulk(h).unwrap();
+                do_read_bulk(h).map_err(|e| format!("Failed to read bulk data: {:?}", e))?;
                 // write the data into the expected chunks size
                 for ch in data.chunks(0x20000) {
                     do_write_blk_cmd(h, String::from(CmdAdnl::OemMwriteRequest).as_bytes())
@@ -141,6 +149,7 @@ fn do_write_data(h: &Handle, offset: u64, data: OemWriteDataType, tx: mpsc::Send
     }
     drop(tx);
     t1.join().unwrap();
+    Ok(())
 }
 
 fn progress_thread(rx: Receiver<usize>) -> JoinHandle<()> {
@@ -163,14 +172,18 @@ fn progress_thread(rx: Receiver<usize>) -> JoinHandle<()> {
                     break;
                 }
             }
-            print!(
-                "\rWrote {:>10}, Elapsed {:>6.02} seconds",
-                total,
-                now.elapsed().as_millis() as f64 / 1000.0
-            );
+            if total > 0 {
+                print!(
+                    "\rWrote {:>10}, Elapsed {:>6.02} seconds",
+                    total,
+                    now.elapsed().as_millis() as f64 / 1000.0
+                );
+            }
             io::stdout().flush().ok();
         }
-        println!();
+        if total > 0 {
+            println!();
+        }
     })
 }
 
@@ -237,7 +250,7 @@ fn chunker_thread(mut data: OemWriteDataType, notify_tx: SyncSender<Vec<u8>>) {
     }
 }
 
-pub fn oem_mwrite(h: &Handle, offset: u64, input: OemWriteType) {
+fn do_oem_mwrite(h: &Handle, offset: u64, input: OemWriteType) -> Result<(), String> {
     use bzip2::bufread;
     let (tx, rx) = std::sync::mpsc::channel::<usize>();
     let progress = progress_thread(rx);
@@ -254,8 +267,33 @@ pub fn oem_mwrite(h: &Handle, offset: u64, input: OemWriteType) {
         OemWriteType::Raw(data) => OemWriteDataType::Buff(data.to_owned()),
     };
 
-    do_write_data(h, offset, data, tx);
+    do_write_data(h, offset, data, tx)?;
     progress.join().expect("Failed to 'join' progress handle");
+    Ok(())
+}
+
+fn oem_erase_backup_gpt_header(h: &Handle) -> Result<(), String> {
+    let sector = [0u8; 512];
+    // first we try to erase the backup gpt header at a very large offset, certainly it will fail, but from the error message we can get the capacity
+    const LARGE_OFFSET: u64 = 1024 * 1024 * 1024 * 1024 - 512;
+    let result = do_oem_mwrite(h, LARGE_OFFSET, OemWriteType::Raw(&sector));
+
+    match result {
+        Ok(_) => Err("Bug, it's impossible to erase the gpt header at this location".into()),
+        Err(e) => {
+            if let Some(caps) = CAPACITY_REGEX.captures(&e) {
+                // now we have the capacity, we can calculate the correct offset to erase the backup gpt header
+                let capacity = u64::from_str_radix(&caps["capacity"], 16).unwrap();
+                do_oem_mwrite(h, capacity - 512, OemWriteType::Raw(&sector))
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+pub fn oem_mwrite(h: &Handle, offset: u64, input: OemWriteType) {
+   do_oem_mwrite(h, offset, input).expect("Failed to 'oem write'");
 }
 
 pub fn oem_mread(h: &Handle, offset: u64, len: u64) {
@@ -334,8 +372,7 @@ fn do_read_bulk(h: &Handle) -> Result<Vec<u8>, String> {
             // get the first item as responses are a bit strange from the device (and is probably a bug)
             // OKAY0x3F800<nul>max-download-size<nul>serialno<nul>product<nul>AMLOGIC<nul>identify<nul>getc
             if let Some(r) = s.split('\0').next() {
-                let re = Regex::new(r"(?<status>(OKAY|FAIL|DATA))(?<msg>.*)").unwrap();
-                match re.captures(r) {
+                match READ_BULK_REGEX.captures(r) {
                     Some(cap) => match &cap["status"] {
                         "OKAY" | "DATA" => Ok(buf[4..len].to_vec()),
                         "FAIL" => Err(String::from(&cap["msg"])),
@@ -559,6 +596,10 @@ pub fn erase_emmc(h: &mut Handle) -> Result<(), String> {
 
     // for good measure, blow away the mbr too
     oem_mwrite(h, 0, OemWriteType::Raw(&data));
+
+    // erase the backup GPT header at the last sector of the storage.
+    // without doing this, U-Boot will be misled by the presence of the backup GPT header.
+    oem_erase_backup_gpt_header(h).unwrap();
 
     // reflash the bootloader we just erased to boot into adnl mode
     let data = UBOOT_BIN_SIGNED;
