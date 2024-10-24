@@ -10,10 +10,18 @@ use std::{
 };
 
 use bzip2::bufread::MultiBzDecoder;
+use lazy_static::lazy_static;
 use regex::Regex;
 use rusb::{Device, DeviceDescriptor, DeviceHandle, GlobalContext};
 
 use crate::{protocol::Handle, USB_VID_AMLOGIC};
+
+lazy_static! {
+    // Regex to match against "Failed to read bulk data: capacity < partStartOff + imgSize 0x:..." in oem mwrite response
+    static ref CAPACITY_REGEX: Regex = Regex::new(r"capacity < partStartOff \+ imgSize 0x:(?<capacity>[0-9a-f]+) ").unwrap();
+    // Regex to match against "OKAY0x3F800<nul>..." etc. in read bulk response
+    static ref READ_BULK_REGEX: Regex = Regex::new(r"(?<status>(OKAY|FAIL|DATA))(?<msg>.*)").unwrap();
+}
 
 // IN is device to host
 const ADNL_IN_EP: u8 = 0x81;
@@ -273,8 +281,7 @@ fn oem_erase_backup_gpt_header(h: &Handle) -> Result<(), String> {
     match result {
         Ok(_) => Err("Bug, it's impossible to erase the gpt header at this location".into()),
         Err(e) => {
-            let re = Regex::new(r"capacity < partStartOff \+ imgSize 0x:(?<capacity>[0-9a-f]+) ").unwrap();
-            if let Some(caps) = re.captures(&e) {
+            if let Some(caps) = CAPACITY_REGEX.captures(&e) {
                 // now we have the capacity, we can calculate the correct offset to erase the backup gpt header
                 let capacity = u64::from_str_radix(&caps["capacity"], 16).unwrap();
                 do_oem_mwrite(h, capacity - 512, OemWriteType::Raw(&sector))
@@ -365,8 +372,7 @@ fn do_read_bulk(h: &Handle) -> Result<Vec<u8>, String> {
             // get the first item as responses are a bit strange from the device (and is probably a bug)
             // OKAY0x3F800<nul>max-download-size<nul>serialno<nul>product<nul>AMLOGIC<nul>identify<nul>getc
             if let Some(r) = s.split('\0').next() {
-                let re = Regex::new(r"(?<status>(OKAY|FAIL|DATA))(?<msg>.*)").unwrap();
-                match re.captures(r) {
+                match READ_BULK_REGEX.captures(r) {
                     Some(cap) => match &cap["status"] {
                         "OKAY" | "DATA" => Ok(buf[4..len].to_vec()),
                         "FAIL" => Err(String::from(&cap["msg"])),
