@@ -267,7 +267,8 @@ fn do_oem_mwrite(h: &Handle, offset: u64, input: OemWriteType) -> Result<(), Str
 fn oem_erase_backup_gpt_header(h: &Handle) -> Result<(), String> {
     let sector = [0u8; 512];
     // first we try to erase the backup gpt header at a very large offset, certainly it will fail, but from the error message we can get the capacity
-    let result = do_oem_mwrite(h, 1024 * 1024 * 1024 * 1024 - 512, OemWriteType::Raw(&sector));
+    const LARGE_OFFSET: u64 = 1024 * 1024 * 1024 * 1024 - 512;
+    let result = do_oem_mwrite(h, LARGE_OFFSET, OemWriteType::Raw(&sector));
 
     match result {
         Ok(_) => Err("Bug, it's impossible to erase the gpt header at this location".into()),
