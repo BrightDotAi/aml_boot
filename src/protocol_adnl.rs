@@ -546,7 +546,10 @@ pub fn do_bootloader_flash(h: &mut Handle) -> Result<(), String> {
 }
 
 pub fn erase_emmc(h: &mut Handle) -> Result<(), String> {
-    do_bootloader_flash(h).expect("Failed to flash bootloader(s)");
+    // If already in TPL, u-boot is running via USB — skip the BL1 USB boot sequence
+    if identify(h) != BootMode::Tpl {
+        do_bootloader_flash(h).expect("Failed to flash bootloader(s)");
+    }
 
     // this will wipe the boot partitions
     do_write_blk_cmd(h, "oem disk_initial 1").unwrap();
@@ -591,7 +594,10 @@ pub fn erase_emmc(h: &mut Handle) -> Result<(), String> {
 }
 
 pub fn do_flash(h: &mut Handle) -> Result<(), String> {
-    do_bootloader_flash(h).expect("Failed to flash bootloader(s)");
+    // If already in TPL, u-boot is running via USB — skip the BL1 USB boot sequence
+    if identify(h) != BootMode::Tpl {
+        do_bootloader_flash(h).expect("Failed to flash bootloader(s)");
+    }
     let data = UBOOT_BIN_SIGNED;
 
     let dlsize = data.len() as u32;
