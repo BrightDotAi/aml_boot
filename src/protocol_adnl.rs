@@ -677,11 +677,13 @@ fn rediscover(
         let elapsed = now.elapsed();
         if elapsed >= max {
             return Err("Failed to find device".into());
-        } else if std::env::consts::OS == "windows" && now.elapsed() >= fallback_delay {
-            // On Windows, even if the device has transitioned into TPL, we still get the device
-            // with the same address, which seems a libusb's platform dependent behavior. To
-            // workaround this, we give rediscover a fallback_delay, after which we ignore the
-            // previous address and discover any device.
+        } else if matches!(std::env::consts::OS, "windows" | "macos")
+            && now.elapsed() >= fallback_delay
+        {
+            // On Windows and macOS, even if the device has transitioned into TPL, we still get
+            // the device with the same address, which seems a libusb's platform dependent
+            // behavior. To workaround this, we give rediscover a fallback_delay, after which we
+            // ignore the previous address and discover any device.
             exclude_addr = None;
         }
 
